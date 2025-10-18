@@ -1,92 +1,87 @@
+const axios = require("axios");
 const moment = require("moment-timezone");
+require("moment/locale/bn");
 
 module.exports.config = {
   name: "autotime",
-  version: "7.0.0",
-  hasPermssion: 2,
-  credits: "Saiful",
-  description: "বট চালু হলেই প্রতি ঘন্টা সময়, বাংলা তারিখ ও দোয়া পাঠাবে",
-  commandCategory: "system",
-  usages: "autotime",
+  version: "1.4.1",
+  hasPermssion: 0,
+  credits: "Sairul Islam (modified)",
+  description: "Auto time hourly update (Bangla, English & Hijri, Default ON)",
+  commandCategory: "Utility",
   cooldowns: 5,
 };
 
-const runningGroups = new Set();
-
-// বাংলা মাস ও সপ্তাহের নাম
 const banglaMonths = [
   "বৈশাখ", "জ্যৈষ্ঠ", "আষাঢ়", "শ্রাবণ", "ভাদ্র", "আশ্বিন",
   "কার্তিক", "অগ্রহায়ণ", "পৌষ", "মাঘ", "ফাল্গুন", "চৈত্র"
 ];
 
-const banglaWeekdays = [
-  "রবিবার", "সোমবার", "মঙ্গলবার",
-  "বুধবার", "বৃহস্পতিবার", "শুক্রবার", "শনিবার"
+const banglaDays = [
+  "রবিবার", "সোমবার", "মঙ্গলবার", "বুধবার",
+  "বৃহস্পতিবার", "শুক্রবার", "শনিবার"
 ];
 
-const banglaDigits = ["০","১","২","৩","৪","৫","৬","৭","৮","৯"];
+// একটি map যাতে থ্রেড마다 একবারই টাইমার চলবে
+let timers = {};
 
-// ইংরেজি সংখ্যা বাংলায় রূপান্তর
-function toBanglaNumber(num) {
-  return num.toString().replace(/\d/g, d => banglaDigits[d]);
+/** Convert English digits to Bangla digits */
+function toBanglaNumber(str) {
+  const map = { "0":"০","1":"১","2":"২","3":"৩","4":"৪","5":"৫","6":"৬","7":"৭","8":"৮","9":"৯" };
+  return str.toString().split("").map(c => map[c] !== undefined ? map[c] : c).join("");
 }
 
-// বাংলা তারিখ গণনা (সঠিক)
-function getBanglaDate(now) {
-  const gYear = now.year();
-  const gMonth = now.month() + 1; // 1-12
-  const gDay = now.date();
+async function sendTimeUpdate(api, threadID) {
+  try {
+    const now = moment().tz("Asia/Dhaka");
 
-  // Pohela Boishakh: 14 April (14-04) গ্রেগরিয়ান
-  let banglaYear = gYear - 593;
-  let dayOfYear = moment(now).dayOfYear();
-  let pohelaBoishakh = moment(`${gYear}-04-14`, "YYYY-MM-DD").dayOfYear();
+    const engDate = now.format("dddd, DD MMMM YYYY");
+    const engTime = now.format("hh:mm A");
 
-  if (dayOfYear < pohelaBoishakh) {
-    banglaYear--;
-    pohelaBoishakh = moment(`${gYear-1}-04-14`, "YYYY-MM-DD").dayOfYear();
-  }
+    const bnDayName = banglaDays[now.day()];
+    const bnDate = now.date();
+    const bnMonth = banglaMonths[now.month()];
+    const bnYear = now.year() - 593;  // বঙ্গাব্দ বছর
+    // Bangla time (hh A) but convert numerals
+    const bnTime = now.locale("bn").format("hh A");
+    const bnTimeBangla = toBanglaNumber(bnTime);
 
-  let dayCount = dayOfYear - pohelaBoishakh + 1;
-  if (dayCount <= 0) dayCount += moment(`${gYear}-12-31`, "YYYY-MM-DD").dayOfYear();
+    const hour = now.hour();
+    let bnTimePeriod;
+    if (hour >= 4 && hour < 12) bnTimePeriod = "সকাল";
+    else if (hour >= 12 && hour < 17) bnTimePeriod = "দুপুর";
+    else if (hour >= 17 && hour < 20) bnTimePeriod = "বিকাল";
+    else bnTimePeriod = "রাত";
 
-  // মাসের দৈর্ঘ্য বাংলা ক্যালেন্ডার অনুযায়ী
-  const monthLengths = [31,31,31,31,31,30,30,30,30,30,30,30]; // Approximate
-  let monthIndex = 0;
-  while(dayCount > monthLengths[monthIndex]) {
-    dayCount -= monthLengths[monthIndex];
-    monthIndex = (monthIndex + 1) % 12;
-  }
+    const today = now.format("DD-MM-YYYY");
+    let hijriDay, hijriMonth, hijriYear;
+    try {
+      const res = await axios.get(`http://api.aladhan.com/v1/gToH?date=${today}`);
+      if (res.data && res.data.data && res.data.data.hijri) {
+        const h = res.data.data.hijri;
+        hijriDay = toBanglaNumber(h.day);
+        // h.month.ar is Arabic month name (in Arabic script). যদি তুমি ইংরেজি চান তাহলে h.month.en
+        hijriMonth = h.month.en || h.month.ar;
+        hijriYear = toBanglaNumber(h.year);
+      } else {
+        hijriDay = hijriMonth = hijriYear = "N/A";
+      }
+    } catch (err) {
+      hijriDay = hijriMonth = hijriYear = "Error";
+      console.error("Hijri API Error:", err.message);
+    }
 
-  const weekday = banglaWeekdays[now.day()];
-
-  return {
-    day: toBanglaNumber(dayCount),
-    month: banglaMonths[monthIndex],
-    year: toBanglaNumber(banglaYear),
-    weekday
-  };
-}
-
-function sendTime(api, threadID) {
-  if (!runningGroups.has(threadID)) return;
-
-  const timeZone = "Asia/Dhaka";
-  const now = moment().tz(timeZone);
-  const time = now.format("hh:mm A");
-  const date = now.format("DD/MM/YYYY, dddd");
-  const bangla = getBanglaDate(now);
-
-  const msg = `
+    const message = `
 ╔═❖═❖═❖═❖═❖═❖═╗
  ⏰ 𝗧𝗜𝗠𝗘 & 𝗗𝗔𝗧𝗘 ⏰
 ╚═❖═❖═❖═❖═❖═❖═╝
-    ╔═✪═🕒═✪═╗
-    সময়: ${time}
-    ╚════════╝
-📅 ইংরেজি তারিখ: ${date}
-🗓️ বাংলা তারিখ: ${bangla.day} ${bangla.month}, ${bangla.year} (${bangla.weekday})
-🌍 টাইমজোন: ${timeZone}
+       ╔═✪═🕒═✪═╗
+          সময়: ${bnTimePeriod} ${bnTimeBangla} টা
+       ╚════════╝
+🗓️ English: ${engDate}
+🗓️ বাংলা: ${bnDayName}, ${toBanglaNumber(bnDate)} ${bnMonth}, ${toBanglaNumber(bnYear)} বঙ্গাব্দ
+🌙 হিজরি: ${hijriDay} ${hijriMonth} ${hijriYear} হিজরি
+🌍 টাইমজোন: Asia/Dhaka
 ━━━━━━━━━━━━━━━━━━━━
 ✨ আল্লাহর নিকটে বেশি বেশি দোয়া করুন..! 
 🙏 ৫ ওয়াক্ত নামাজ নিয়মিত পড়ুন..!
@@ -94,62 +89,47 @@ function sendTime(api, threadID) {
 ━━━━━━━━━━━━━━━━━━━━
 🌸✨🌙🕊️🌼🌿🕌💖🌙🌸✨🌺
 
-🌟 𝐂𝐫𝐞𝐚𝐭𝐨𝐫 ━ 𝐒𝐚𝐢𝐟𝐮𝐥 𝐈𝐬𝐥𝐚𝐦 🌟
-`;
+🌟 𝐂𝐫𝐞𝐚𝐭𝐨𝐫 ━ 𝐒𝐚𝐢𝐫𝐮𝐥 𝐈𝐬𝐥𝐚𝐦 🌟
+`.trim();
 
-  api.sendMessage(msg, threadID);
+    // পাঠাও মেসেজ
+    api.sendMessage(message, threadID);
+
+  } catch (err) {
+    console.error("AutoTime Error:", err);
+  }
 }
 
-// রানার ফাংশন একই থাকবে
-module.exports.run = async function ({ api, event }) {
-  const threadID = event.threadID;
+module.exports.onLoad = function ({ api }) {
+  console.log("✅ AutoTime module loaded.");
 
-  if (runningGroups.has(threadID)) {
-    return api.sendMessage("⏰ এই গ্রুপে ইতিমধ্যে AutoTime চলছে!", threadID);
+  // যদি global.data.allThreadIDs থাকে
+  if (global.data && global.data.allThreadIDs) {
+    global.data.allThreadIDs.forEach(threadID => {
+      // যদি ইতিমধ্যে টাইমার সেট করা থাকে, ওভারল্যাপ এড়াও
+      if (timers[threadID]) return;
+
+      const now = moment().tz("Asia/Dhaka");
+      const nextHour = moment(now).add(1, "hour").startOf("hour");
+      const msUntilNextHour = nextHour.diff(now);
+
+      // একটি timeout দিয়ে শুরু করো
+      timers[threadID] = true;
+
+      setTimeout(() => {
+        sendTimeUpdate(api, threadID);
+
+        // এরপর প্রতি ঘন্টায়
+        timers[threadID] = setInterval(() => {
+          sendTimeUpdate(api, threadID);
+        }, 60 * 60 * 1000);
+
+      }, msUntilNextHour);
+    });
   }
-
-  runningGroups.add(threadID);
-  api.sendMessage("✅ বট চালু হয়েছে। এখন থেকে প্রতি ঘন্টা সময়, তারিখ ও দোয়া পাঠানো হবে।", threadID);
-
-  const timeZone = "Asia/Dhaka";
-  const now = moment().tz(timeZone);
-  const nextHour = now.clone().add(1, "hour").startOf("hour");
-  let delay = nextHour.diff(now);
-
-  setTimeout(function tick() {
-    if (!runningGroups.has(threadID)) return;
-
-    sendTime(api, threadID);
-
-    setInterval(() => {
-      if (!runningGroups.has(threadID)) return;
-      sendTime(api, threadID);
-    }, 60 * 60 * 1000);
-
-  }, delay);
 };
 
-module.exports.handleEvent = async function ({ api, event }) {
-  const threadID = event.threadID;
-
-  if (!runningGroups.has(threadID)) {
-    runningGroups.add(threadID);
-
-    const timeZone = "Asia/Dhaka";
-    const now = moment().tz(timeZone);
-    const nextHour = now.clone().add(1, "hour").startOf("hour");
-    let delay = nextHour.diff(now);
-
-    setTimeout(function tick() {
-      if (!runningGroups.has(threadID)) return;
-
-      sendTime(api, threadID);
-
-      setInterval(() => {
-        if (!runningGroups.has(threadID)) return;
-        sendTime(api, threadID);
-      }, 60 * 60 * 1000);
-
-    }, delay);
-  }
+module.exports.run = async function ({ api, event }) {
+  // চালিয়ে দাও ম্যানুয়ালি
+  sendTimeUpdate(api, event.threadID);
 };
